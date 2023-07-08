@@ -7,6 +7,7 @@ from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -30,8 +31,19 @@ from video2x import Interpolator, Upscaler, Video2X
 class VideoUpscaleWorker(QObject):
     finished = pyqtSignal()
     progress = pyqtSignal(int, int)
+    error = pyqtSignal(str)
 
-    def upscale(self, input_path, output_path, width, height, algorithm):
+    def upscale(
+        self,
+        input_path,
+        output_path,
+        width,
+        height,
+        noise,
+        processes,
+        threshold,
+        algorithm,
+    ):
         try:
             # setup video2x object
             video2x = Video2X(progress_callback=self.report_progress)
@@ -42,18 +54,16 @@ class VideoUpscaleWorker(QObject):
                 output_path,
                 width,
                 height,
-                3,
-                1,
-                0,
+                noise,
+                processes,
+                threshold,
                 algorithm,
             )
             self.finished.emit()
         except Exception as error:
-            self.finished.emit()
-            QMessageBox.critical(None, "Error", f"An error occurred: {str(error)}")
-            sys.exit()
+            self.error.emit(str(error))
 
-    def interpolate(self, input_path, output_path, algorithm):
+    def interpolate(self, input_path, output_path, processes, threshold, algorithm):
         try:
             # setup video2x object
             video2x = Video2X(progress_callback=self.report_progress)
@@ -62,43 +72,66 @@ class VideoUpscaleWorker(QObject):
             video2x.interpolate(
                 input_path,
                 output_path,
-                1,
-                5,
+                processes,
+                threshold,
                 algorithm,
             )
             self.finished.emit()
         except Exception as error:
-            self.finished.emit()
-            QMessageBox.critical(None, "Error", f"An error occurred: {str(error)}")
-            sys.exit()
+            self.error.emit(str(error))
 
     def report_progress(self, current: int, total: int) -> None:
         self.progress.emit(current, total)
 
 
-class SettingsWidget(QWidget):
+class AdvancedSettingsWidget(QWidget):
     def __init__(self, parent):
         super().__init__()
 
         self.parent = parent
+        self.resize(700, 0)
 
         main_layout = QVBoxLayout()
 
         # output group
-        output_group = QGroupBox("Output")
-        output_layout = QHBoxLayout()
-        parent.output = QLineEdit(self)
-        button2 = QPushButton("Choose File", self)
-        button2.clicked.connect(lambda: self.parent.choose_file(parent.output))
-        output_layout.addWidget(parent.output)
-        output_layout.addWidget(button2)
+        output_group = QGroupBox("Output Settings")
+        output_layout = QFormLayout()
+        output_line_layout = QHBoxLayout()
+        self.output = QLineEdit(self)
+        self.output.setPlaceholderText("leave empty to use the input file's directory")
+        choose_file_button = QPushButton("Choose Directory", self)
+        choose_file_button.clicked.connect(lambda: self.choose_directory(self.output))
+        output_line_layout.addWidget(self.output)
+        output_line_layout.addWidget(choose_file_button)
+        self.output_format_string = QLineEdit(self)
+        self.output_format_string.setText(
+            "{filename}_{action}_{algorithm}_{settings}.{suffix}"
+        )
+        self.output_file_suffix = QLineEdit(self)
+        self.output_file_suffix.setText("mp4")
+        output_layout.addRow("Output Directory", output_line_layout)
+        output_layout.addRow("Output Format String", self.output_format_string)
+        output_layout.addRow("Output File Suffix", self.output_file_suffix)
         output_group.setLayout(output_layout)
 
         # algorithm settings group
         settings_group = QGroupBox("Algorithm Settings")
         settings_layout = QFormLayout()
-        self.noise_level_spinbox = QSpinBox(self)
-        settings_layout.addRow("Noise Level", self.noise_level_spinbox)
+        self.processes_spinbox = QSpinBox(self)
+        self.processes_spinbox.setMinimum(1)
+        self.processes_spinbox.setValue(1)
+        self.processes_spinbox.setSingleStep(1)
+        self.upscaling_threshold = QDoubleSpinBox(self)
+        self.upscaling_threshold.setMinimum(0)
+        self.upscaling_threshold.setMaximum(100)
+        self.upscaling_threshold.setValue(0)
+        self.interpolation_threshold = QDoubleSpinBox(self)
+        self.interpolation_threshold.setMinimum(0)
+        self.interpolation_threshold.setMaximum(100)
+        self.interpolation_threshold.setValue(5)
+        settings_layout.addRow("Processes", self.processes_spinbox)
+        settings_layout.addRow("Upscaling Threshold", self.upscaling_threshold)
+        settings_layout.addRow("Interpolation Threshold", self.interpolation_threshold)
         settings_group.setLayout(settings_layout)
 
         main_layout.addWidget(output_group)
@@ -112,6 +145,13 @@ class SettingsWidget(QWidget):
 
     def on_close_clicked(self):
         self.hide()
+
+    def choose_directory(self, line_edit):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Choose Directory", "", QFileDialog.Option.ShowDirsOnly
+        )
+        if directory:
+            line_edit.setText(directory)
 
 
 class FileListItem(QListWidgetItem):
@@ -219,7 +259,7 @@ class Video2XQt6(QWidget):
 
         self.width_label = QLabel("Width (0=Auto)", self)
         self.height_label = QLabel("Height (0=Auto)", self)
-        self.noise_level_label = QLabel("Noise Level", self)
+        self.noise_label = QLabel("Noise", self)
         self.framerate_label = QLabel("Framerate", self)
 
         self.width_spinbox = QSpinBox(self)
@@ -228,7 +268,7 @@ class Video2XQt6(QWidget):
         self.height_spinbox = QSpinBox(self)
         self.height_spinbox.setRange(0, 10000)
         self.height_spinbox.setValue(2160)
-        self.noise_level_spinbox = QSpinBox(self)
+        self.noise_spinbox = QSpinBox(self)
         self.framerate_spinbox = QDoubleSpinBox(self)
         self.framerate_spinbox.setRange(0.01, 1000)
         self.framerate_spinbox.setSingleStep(1.0)
@@ -238,7 +278,7 @@ class Video2XQt6(QWidget):
         settings_layout.addRow("Algorithm", self.algorithm_combo)
         settings_layout.addRow(self.width_label, self.width_spinbox)
         settings_layout.addRow(self.height_label, self.height_spinbox)
-        settings_layout.addRow(self.noise_level_label, self.noise_level_spinbox)
+        settings_layout.addRow(self.noise_label, self.noise_spinbox)
         settings_layout.addRow(self.framerate_label, self.framerate_spinbox)
         settings_group.setLayout(settings_layout)
 
@@ -250,13 +290,13 @@ class Video2XQt6(QWidget):
         # start button and checkbox
         start_layout = QHBoxLayout()
         self.start_button = QPushButton("Start", self)
-        self.start_button.clicked.connect(self.start_upscale)
+        self.start_button.clicked.connect(self.start_processing)
         self.stop_button = QPushButton("Stop", self)
         self.stop_button.clicked.connect(self.stop_upscale)
         self.stop_button.hide()
         self.advanced_settings_button = QPushButton("Advanced Settings", self)
         self.advanced_settings_button.clicked.connect(self.show_advanced_settings)
-        self.settings_widget = SettingsWidget(self)
+        self.advanced_settings_widget = AdvancedSettingsWidget(self)
         start_layout.addWidget(self.start_button)
         start_layout.addWidget(self.stop_button)
         start_layout.addWidget(self.advanced_settings_button)
@@ -297,12 +337,12 @@ class Video2XQt6(QWidget):
         # Show everything
         self.width_label.show()
         self.height_label.show()
-        self.noise_level_label.show()
+        self.noise_label.show()
         self.framerate_label.show()
 
         self.width_spinbox.show()
         self.height_spinbox.show()
-        self.noise_level_spinbox.show()
+        self.noise_spinbox.show()
         self.framerate_spinbox.show()
 
         if action == "Upscale":
@@ -317,16 +357,16 @@ class Video2XQt6(QWidget):
             # hide things not needed for Interpolate
             self.width_label.hide()
             self.height_label.hide()
-            self.noise_level_label.hide()
+            self.noise_label.hide()
 
             self.width_spinbox.hide()
             self.height_spinbox.hide()
-            self.noise_level_spinbox.hide()
+            self.noise_spinbox.hide()
 
         self.algorithm_combo.setCurrentIndex(0)
 
     def show_advanced_settings(self):
-        self.settings_widget.show()
+        self.advanced_settings_widget.show()
 
     def choose_file(self, target_input):
         file_name, _ = QFileDialog.getOpenFileName(
@@ -335,18 +375,48 @@ class Video2XQt6(QWidget):
         if file_name:
             target_input.setText(file_name)
 
-    def start_upscale(self):
+    def start_processing(self):
         if self.input.count() == 0:
             QMessageBox.critical(self, "Error", "No input file specified.")
             return
 
         for i in range(self.input.count()):
             input_path = pathlib.Path(self.input.item(i).file_path)
-            output_path = pathlib.Path(self.output.text())
             width = self.width_spinbox.value()
             height = self.height_spinbox.value()
             action = self.action_combo.currentText()
+            noise = self.noise_spinbox.value()
+            processes = self.advanced_settings_widget.processes_spinbox.value()
+            upscale_threshold = (
+                self.advanced_settings_widget.upscaling_threshold.value()
+            )
+            interpolation_threshold = (
+                self.advanced_settings_widget.interpolation_threshold.value()
+            )
             algorithm = self.algorithm_combo.currentText()
+
+            if action == "Upscale":
+                settings_string = f"{width}x{height}_{noise}"
+            else:
+                settings_string = ""
+
+            output_file = pathlib.Path(
+                self.advanced_settings_widget.output_format_string.text().format(
+                    filename=input_path.stem,
+                    action=action.lower(),
+                    algorithm=algorithm,
+                    settings=settings_string,
+                    suffix=self.advanced_settings_widget.output_file_suffix.text(),
+                )
+            )
+
+            if self.advanced_settings_widget.output.text() == "":
+                output_path = input_path.parent / output_file
+            else:
+                output_path = (
+                    pathlib.Path(self.advanced_settings_widget.output.text())
+                    / output_file
+                )
 
             if input_path.is_file() is False:
                 QMessageBox.critical(
@@ -370,23 +440,35 @@ class Video2XQt6(QWidget):
             self.stop_button.show()
 
             # set up worker and thread
-            self.worker = VideoUpscaleWorker()
             self.video2x_thread = QThread()
-
-            # move worker to thread and connect signals
+            self.worker = VideoUpscaleWorker()
             self.worker.moveToThread(self.video2x_thread)
             self.worker.finished.connect(self.upscale_finish)
             self.worker.progress.connect(self.update_progress)
+            self.worker.error.connect(self.handle_error)
 
             if action == "Upscale":
                 self.video2x_thread.started.connect(
                     lambda: self.worker.upscale(
-                        input_path, output_path, width, height, algorithm
+                        input_path,
+                        output_path,
+                        width,
+                        height,
+                        noise,
+                        processes,
+                        upscale_threshold,
+                        algorithm,
                     )
                 )
             elif action == "Interpolate":
                 self.video2x_thread.started.connect(
-                    lambda: self.worker.interpolate(input_path, output_path, algorithm)
+                    lambda: self.worker.interpolate(
+                        input_path,
+                        output_path,
+                        processes,
+                        interpolation_threshold,
+                        algorithm,
+                    )
                 )
             else:
                 raise ValueError(f"Invalid action: {action}")
@@ -414,6 +496,14 @@ class Video2XQt6(QWidget):
     def update_progress(self, current: int, total: int):
         self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(current)
+
+    def handle_error(self, message: str):
+        QMessageBox.critical(self, "Error", message)
+
+        self.start_button.setText("Start")
+        self.video2x_thread.quit()
+        self.video2x_thread.wait()
+        self.stop_button.hide()
 
 
 def main():
